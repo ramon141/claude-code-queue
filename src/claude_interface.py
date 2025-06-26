@@ -41,23 +41,18 @@ class ClaudeCodeInterface:
         start_time = time.time()
         
         try:
-            # Store current directory to restore later
             original_cwd = os.getcwd()
             
-            # Change to the working directory (Claude Code security requirement)
             working_dir = Path(prompt.working_directory).resolve()
             if not working_dir.exists():
                 working_dir.mkdir(parents=True, exist_ok=True)
             
             os.chdir(working_dir)
             
-            # Prepare command
             cmd = [self.claude_command, "--print", "--dangerously-skip-permissions"]  # Use --print for non-interactive output and skip permissions
             
-            # Build the full prompt with context files
             full_prompt = prompt.content
             
-            # Add context files using @ syntax if specified
             if prompt.context_files:
                 context_refs = []
                 for context_file in prompt.context_files:
@@ -68,10 +63,8 @@ class ClaudeCodeInterface:
                 if context_refs:
                     full_prompt = f"{' '.join(context_refs)} {prompt.content}"
             
-            # Add the prompt
             cmd.append(full_prompt)
             
-            # Execute command (no need for cwd since we changed directory)
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -79,15 +72,12 @@ class ClaudeCodeInterface:
                 timeout=self.timeout
             )
             
-            # Restore original directory
             os.chdir(original_cwd)
             
             execution_time = time.time() - start_time
             
-            # Check for rate limiting
             rate_limit_info = self._detect_rate_limit(result.stdout + result.stderr)
             
-            # Determine success
             success = result.returncode == 0 and not rate_limit_info.is_rate_limited
             
             return ExecutionResult(
@@ -99,7 +89,6 @@ class ClaudeCodeInterface:
             )
             
         except subprocess.TimeoutExpired:
-            # Restore directory before returning
             try:
                 os.chdir(original_cwd)
             except:
@@ -112,7 +101,6 @@ class ClaudeCodeInterface:
                 execution_time=execution_time
             )
         except Exception as e:
-            # Restore directory before returning
             try:
                 os.chdir(original_cwd)
             except:
@@ -153,25 +141,20 @@ class ClaudeCodeInterface:
     def _extract_reset_time_from_limit_message(self, output: str) -> Optional[datetime]:
         """Extract reset time from Claude's limit message."""
         try:
-            # Look for patterns like "Claude AI usage limit reached|1750636800"
             import re
             
-            # Pattern 1: timestamp after pipe
             pattern1 = r"usage limit reached\|(\d+)"
             match1 = re.search(pattern1, output, re.IGNORECASE)
             if match1:
                 timestamp = int(match1.group(1))
                 return datetime.fromtimestamp(timestamp)
             
-            # Pattern 2: ISO format timestamps
             pattern2 = r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?)"
             matches = re.findall(pattern2, output)
             if matches:
-                # Take the latest timestamp
                 latest_time = None
                 for match in matches:
                     try:
-                        # Handle different timestamp formats
                         if match.endswith('Z'):
                             ts = datetime.fromisoformat(match.replace('Z', '+00:00'))
                         else:
@@ -183,7 +166,6 @@ class ClaudeCodeInterface:
                         continue
                 
                 if latest_time:
-                    # Add 5 hours to get next reset window
                     return latest_time + timedelta(hours=5)
             
         except Exception as e:
@@ -193,11 +175,8 @@ class ClaudeCodeInterface:
     
     def _estimate_reset_time(self, output: str) -> datetime:
         """Estimate reset time based on Claude's 5-hour windows."""
-        # Claude Code has 5-hour windows, estimate next reset
         now = datetime.now()
         
-        # Round to next 5-hour boundary
-        # Assuming windows start at midnight, 5am, 10am, 3pm, 8pm
         hour = now.hour
         if hour < 5:
             next_reset = now.replace(hour=5, minute=0, second=0, microsecond=0)
@@ -208,10 +187,8 @@ class ClaudeCodeInterface:
         elif hour < 20:
             next_reset = now.replace(hour=20, minute=0, second=0, microsecond=0)
         else:
-            # Next day at midnight
             next_reset = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
         
-        # If we're already past the boundary, add 5 hours
         if next_reset <= now:
             next_reset += timedelta(hours=5)
         
@@ -250,7 +227,6 @@ class ClaudeCodeInterface:
             )
             
             if result.returncode == 0:
-                # Parse help output to extract commands
                 lines = result.stdout.split('\n')
                 commands = []
                 in_commands_section = False
@@ -261,7 +237,6 @@ class ClaudeCodeInterface:
                         continue
                     
                     if in_commands_section and line.strip():
-                        # Extract command names
                         if line.startswith('  '):
                             cmd = line.strip().split()[0]
                             if cmd and not cmd.startswith('-'):

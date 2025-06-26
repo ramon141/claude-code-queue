@@ -54,7 +54,6 @@ class QueuedPrompt:
         if self.status != PromptStatus.RATE_LIMITED:
             return True
         
-        # Check if reset time has passed
         if self.reset_time and datetime.now() >= self.reset_time:
             return True
             

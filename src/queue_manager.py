@@ -27,7 +27,6 @@ class QueueManager:
         self.running = False
         self.state: Optional[QueueState] = None
         
-        # Setup signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
     
@@ -40,7 +39,6 @@ class QueueManager:
         """Start the queue processing loop."""
         print("Starting Claude Code Queue Manager...")
         
-        # Test Claude Code connection
         is_working, message = self.claude_interface.test_connection()
         if not is_working:
             print(f"Error: {message}")
@@ -48,7 +46,6 @@ class QueueManager:
         
         print(f"✓ {message}")
         
-        # Load initial state
         self.state = self.storage.load_queue_state()
         print(f"✓ Loaded queue with {len(self.state.prompts)} prompts")
         
@@ -58,7 +55,7 @@ class QueueManager:
             while self.running:
                 self._process_queue_iteration(callback)
                 
-                if self.running:  # Check if we're still running after processing
+                if self.running:
                     time.sleep(self.check_interval)
                     
         except KeyboardInterrupt:
@@ -77,13 +74,11 @@ class QueueManager:
         print("Shutting down...")
         
         if self.state:
-            # Reset any executing prompts back to queued
             for prompt in self.state.prompts:
                 if prompt.status == PromptStatus.EXECUTING:
                     prompt.status = PromptStatus.QUEUED
                     prompt.add_log("Execution interrupted during shutdown")
             
-            # Save final state
             self.storage.save_queue_state(self.state)
             print("✓ Queue state saved")
         
@@ -91,17 +86,13 @@ class QueueManager:
     
     def _process_queue_iteration(self, callback: Optional[Callable[[QueueState], None]] = None) -> None:
         """Process one iteration of the queue."""
-        # Reload state to pick up new prompts
         self.state = self.storage.load_queue_state()
         
-        # Check if we have any rate-limited prompts that might be ready
         self._check_rate_limited_prompts()
         
-        # Get next prompt to execute
         next_prompt = self.state.get_next_prompt()
         
         if next_prompt is None:
-            # No prompts ready, check if we're waiting for rate limit reset
             rate_limited_prompts = [p for p in self.state.prompts if p.status == PromptStatus.RATE_LIMITED]
             if rate_limited_prompts:
                 next_reset = min(p.reset_time for p in rate_limited_prompts if p.reset_time)
@@ -112,18 +103,15 @@ class QueueManager:
                     else:
                         print("Rate limit should have reset, checking prompts...")
             else:
-                # No prompts in queue at all
                 print("No prompts in queue")
             
             if callback:
                 callback(self.state)
             return
         
-        # Execute the prompt
         print(f"Executing prompt {next_prompt.id}: {next_prompt.content[:50]}...")
         self._execute_prompt(next_prompt)
         
-        # Save state after execution
         self.storage.save_queue_state(self.state)
         
         if callback:
@@ -149,18 +137,14 @@ class QueueManager:
     
     def _execute_prompt(self, prompt: QueuedPrompt) -> None:
         """Execute a single prompt."""
-        # Mark as executing
         prompt.status = PromptStatus.EXECUTING
         prompt.last_executed = datetime.now()
         prompt.add_log(f"Started execution (attempt {prompt.retry_count + 1}/{prompt.max_retries})")
         
-        # Save state to show execution status
         self.storage.save_queue_state(self.state)
         
-        # Execute the prompt
         result = self.claude_interface.execute_prompt(prompt)
         
-        # Process result
         self._process_execution_result(prompt, result)
     
     def _process_execution_result(self, prompt: QueuedPrompt, result: ExecutionResult) -> None:
@@ -168,7 +152,6 @@ class QueueManager:
         execution_summary = f"Execution completed in {result.execution_time:.1f}s"
         
         if result.success:
-            # Successful execution
             prompt.status = PromptStatus.COMPLETED
             prompt.add_log(f"{execution_summary} - SUCCESS")
             if result.output:
@@ -178,16 +161,13 @@ class QueueManager:
             print(f"✓ Prompt {prompt.id} completed successfully")
             
         elif result.is_rate_limited:
-            # Rate limited
             prompt.status = PromptStatus.RATE_LIMITED
             prompt.rate_limited_at = datetime.now()
             prompt.retry_count += 1
             
-            # Set reset time from rate limit info
             if result.rate_limit_info and result.rate_limit_info.reset_time:
                 prompt.reset_time = result.rate_limit_info.reset_time
             else:
-                # Fallback: estimate 5 hours from now
                 prompt.reset_time = datetime.now() + timedelta(hours=5)
             
             prompt.add_log(f"{execution_summary} - RATE LIMITED")
@@ -200,18 +180,15 @@ class QueueManager:
             print(f"⚠ Prompt {prompt.id} rate limited, reset in {self._format_duration(reset_in)}")
             
         else:
-            # Failed execution
             prompt.retry_count += 1
             
             if prompt.can_retry():
-                # Can retry
                 prompt.status = PromptStatus.QUEUED
                 prompt.add_log(f"{execution_summary} - FAILED (will retry)")
                 if result.error:
                     prompt.add_log(f"Error: {result.error}")
                 print(f"✗ Prompt {prompt.id} failed, will retry ({prompt.retry_count}/{prompt.max_retries})")
             else:
-                # Max retries exceeded
                 prompt.status = PromptStatus.FAILED
                 prompt.add_log(f"{execution_summary} - FAILED (max retries exceeded)")
                 if result.error:
@@ -242,14 +219,11 @@ class QueueManager:
     def add_prompt(self, prompt: QueuedPrompt) -> bool:
         """Add a prompt to the queue."""
         try:
-            # Load current state
             if not self.state:
                 self.state = self.storage.load_queue_state()
             
-            # Add prompt
             self.state.add_prompt(prompt)
             
-            # Save state
             success = self.storage.save_queue_state(self.state)
             if success:
                 print(f"✓ Added prompt {prompt.id} to queue")
@@ -265,11 +239,9 @@ class QueueManager:
     def remove_prompt(self, prompt_id: str) -> bool:
         """Remove a prompt from the queue."""
         try:
-            # Load current state
             if not self.state:
                 self.state = self.storage.load_queue_state()
             
-            # Find and cancel prompt
             prompt = self.state.get_prompt(prompt_id)
             if prompt:
                 if prompt.status == PromptStatus.EXECUTING:
@@ -279,7 +251,6 @@ class QueueManager:
                 prompt.status = PromptStatus.CANCELLED
                 prompt.add_log("Cancelled by user")
                 
-                # Save state
                 success = self.storage.save_queue_state(self.state)
                 if success:
                     print(f"✓ Cancelled prompt {prompt_id}")

@@ -68,11 +68,9 @@ Examples:
     
     subparsers = parser.add_subparsers(dest='command', help='Available commands')
     
-    # Start command
     start_parser = subparsers.add_parser('start', help='Start the queue processor')
     start_parser.add_argument('--verbose', '-v', action='store_true', help='Verbose output')
     
-    # Add command
     add_parser = subparsers.add_parser('add', help='Add a prompt to the queue')
     add_parser.add_argument('prompt', help='The prompt text')
     add_parser.add_argument('--priority', '-p', type=int, default=0, help='Priority (lower = higher priority)')
@@ -81,26 +79,21 @@ Examples:
     add_parser.add_argument('--max-retries', '-r', type=int, default=3, help='Maximum retry attempts')
     add_parser.add_argument('--estimated-tokens', '-t', type=int, help='Estimated token usage')
     
-    # Template command
     template_parser = subparsers.add_parser('template', help='Create a prompt template file')
     template_parser.add_argument('filename', help='Template filename (without .md extension)')
     template_parser.add_argument('--priority', '-p', type=int, default=0, help='Default priority')
     
-    # Status command  
     status_parser = subparsers.add_parser('status', help='Show queue status')
     status_parser.add_argument('--json', action='store_true', help='Output as JSON')
     status_parser.add_argument('--detailed', '-d', action='store_true', help='Show detailed prompt info')
     
-    # Cancel command
     cancel_parser = subparsers.add_parser('cancel', help='Cancel a prompt')
     cancel_parser.add_argument('prompt_id', help='Prompt ID to cancel')
     
-    # List command
     list_parser = subparsers.add_parser('list', help='List prompts')
     list_parser.add_argument('--status', choices=[s.value for s in PromptStatus], help='Filter by status')
     list_parser.add_argument('--json', action='store_true', help='Output as JSON')
     
-    # Test command
     test_parser = subparsers.add_parser('test', help='Test Claude Code connection')
     
     args = parser.parse_args()
