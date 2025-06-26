@@ -232,9 +232,8 @@ The system automatically detects Claude Code rate limits by monitoring:
 When rate limited:
 
 1. Prompt status changes to `rate_limited`
-2. System calculates next reset time (5-hour windows)
-3. Queue processing pauses until reset
-4. Failed prompt is retried automatically
+2. Naively loop every 30 seconds until rate limit is lifted (there's probably a way smarter way to find the end time of rate limit window， open to contributions)
+3. Once the rate limit is lifted, continue processing the requests
 
 ## Troubleshooting
 
