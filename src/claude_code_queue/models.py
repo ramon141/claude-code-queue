@@ -38,6 +38,8 @@ class QueuedPrompt:
     last_executed: Optional[datetime] = None
     rate_limited_at: Optional[datetime] = None
     reset_time: Optional[datetime] = None
+    session_id: Optional[str] = None  # Claude Code session ID for --resume
+    is_session_start: bool = False  # True if this prompt starts a new chat session
 
     def add_log(self, message: str) -> None:
         """Add a log entry with timestamp."""
@@ -70,31 +72,6 @@ class RateLimitInfo:
     reset_time: Optional[datetime] = None
     limit_message: str = ""
     timestamp: Optional[datetime] = None
-
-    @classmethod
-    def from_claude_response(cls, response_text: str) -> "RateLimitInfo":
-        """Parse rate limit info from Claude Code response."""
-        # Common rate limit indicators in Claude Code responses
-        rate_limit_indicators = [
-            "usage limit reached",
-            "rate limit",
-            "too many requests",
-            "quota exceeded",
-            "limit exceeded",
-        ]
-
-        is_limited = any(
-            indicator in response_text.lower() for indicator in rate_limit_indicators
-        )
-
-        if is_limited:
-            return cls(
-                is_rate_limited=True,
-                limit_message=response_text.strip(),
-                timestamp=datetime.now(),
-            )
-
-        return cls(is_rate_limited=False)
 
 
 @dataclass

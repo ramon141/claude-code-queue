@@ -41,7 +41,10 @@ class ClaudeCodeInterface:
     def execute_prompt(self, prompt: QueuedPrompt) -> ExecutionResult:
         """Execute a prompt via Claude Code CLI."""
         start_time = time.time()
+        return self._execute_with_cli(prompt, start_time)
 
+    def _execute_with_cli(self, prompt: QueuedPrompt, start_time: float) -> ExecutionResult:
+        """Execute prompt using Claude CLI."""
         try:
             original_cwd = os.getcwd()
 
@@ -56,6 +59,10 @@ class ClaudeCodeInterface:
                 "--print",
                 "--dangerously-skip-permissions",
             ]  # Use --print for non-interactive output and skip permissions
+
+            # Add --resume if session_id is provided (for fake session IDs)
+            if prompt.session_id:
+                cmd.extend(["--resume", prompt.session_id])
 
             full_prompt = prompt.content
 
@@ -222,43 +229,3 @@ class ClaudeCodeInterface:
             return False, "Claude Code CLI test timed out"
         except Exception as e:
             return False, f"Claude Code CLI test failed: {str(e)}"
-
-    def get_available_commands(self) -> List[str]:
-        """Get available Claude Code commands."""
-        try:
-            result = subprocess.run(
-                [self.claude_command, "--help"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-
-            if result.returncode == 0:
-                lines = result.stdout.split("\n")
-                commands = []
-                in_commands_section = False
-
-                for line in lines:
-                    if "commands:" in line.lower() or "usage:" in line.lower():
-                        in_commands_section = True
-                        continue
-
-                    if in_commands_section and line.strip():
-                        if line.startswith("  "):
-                            cmd = line.strip().split()[0]
-                            if cmd and not cmd.startswith("-"):
-                                commands.append(cmd)
-
-                return commands
-
-        except Exception as e:
-            print(f"Error getting available commands: {e}")
-
-        return []
-
-    def execute_simple_prompt(
-        self, prompt_text: str, working_dir: str = "."
-    ) -> ExecutionResult:
-        """Execute a simple prompt without full QueuedPrompt object."""
-        simple_prompt = QueuedPrompt(content=prompt_text, working_directory=working_dir)
-        return self.execute_prompt(simple_prompt)

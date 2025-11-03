@@ -56,6 +56,8 @@ class MarkdownPromptParser:
                 context_files=metadata.get("context_files", []),
                 max_retries=metadata.get("max_retries", 3),
                 estimated_tokens=metadata.get("estimated_tokens"),
+                session_id=metadata.get("session_id"),
+                is_session_start=metadata.get("is_session_start", False),
                 created_at=datetime.fromtimestamp(file_path.stat().st_ctime),
             )
 
@@ -82,6 +84,10 @@ class MarkdownPromptParser:
                 metadata["context_files"] = prompt.context_files
             if prompt.estimated_tokens:
                 metadata["estimated_tokens"] = prompt.estimated_tokens
+            if prompt.session_id:
+                metadata["session_id"] = prompt.session_id
+            if prompt.is_session_start:
+                metadata["is_session_start"] = prompt.is_session_start
             if prompt.last_executed:
                 metadata["last_executed"] = prompt.last_executed.isoformat()
             if prompt.rate_limited_at:
@@ -122,12 +128,16 @@ class QueueStorage:
         self.queue_dir = self.base_dir / "queue"
         self.completed_dir = self.base_dir / "completed"
         self.failed_dir = self.base_dir / "failed"
+        self.chats_dir = self.base_dir / "chats"
         self.state_file = self.base_dir / "queue-state.json"
 
-        for dir_path in [self.queue_dir, self.completed_dir, self.failed_dir]:
+        for dir_path in [self.queue_dir, self.completed_dir, self.failed_dir, self.chats_dir]:
             dir_path.mkdir(parents=True, exist_ok=True)
 
         self.parser = MarkdownPromptParser()
+
+        from .chat_sessions import ChatSessionManager
+        self.chat_sessions = ChatSessionManager(base_dir)
 
     def load_queue_state(self) -> QueueState:
         """Load queue state from storage."""
@@ -222,8 +232,12 @@ class QueueStorage:
         try:
             base_filename = MarkdownPromptParser.get_base_filename(prompt)
             if prompt.status == PromptStatus.COMPLETED:
-                target_dir = self.completed_dir
                 self._remove_prompt_files(prompt.id, self.queue_dir)
+                if prompt.session_id:
+                    chat_name = self._get_chat_name_from_session(prompt.session_id)
+                    self.append_to_chat_file(prompt, chat_name)
+                    return True
+                target_dir = self.completed_dir
             elif prompt.status == PromptStatus.FAILED:
                 target_dir = self.failed_dir
                 self._remove_prompt_files(prompt.id, self.queue_dir)
@@ -276,18 +290,6 @@ class QueueStorage:
         text = text.strip("-")
         return text[:50]
 
-    def add_prompt_from_markdown(self, file_path: Path) -> Optional[QueuedPrompt]:
-        """Add a prompt from an existing markdown file."""
-        prompt = self.parser.parse_prompt_file(file_path)
-        if prompt:
-            if file_path.parent != self.queue_dir:
-                new_path = self.queue_dir / file_path.name
-                shutil.move(str(file_path), str(new_path))
-
-            prompt.status = PromptStatus.QUEUED
-            return prompt
-        return None
-
     def create_prompt_template(self, filename: str, priority: int = 0) -> Path:
         """Create a prompt template file."""
         template_content = f"""---
@@ -314,3 +316,95 @@ What should be delivered...
             f.write(template_content)
 
         return file_path
+
+    def _get_chat_name_from_session(self, session_id: str) -> str:
+        """Get chat name from session ID using ChatSessionManager."""
+        try:
+            chats = self.chat_sessions.list_chat_sessions()
+            for chat in chats:
+                if chat['session_id'] == session_id:
+                    return chat['chat_name']
+        except Exception:
+            pass
+        return None
+
+    def append_to_chat_file(self, prompt: QueuedPrompt, chat_name: str = None) -> bool:
+        """Append a completed prompt to its chat file."""
+        try:
+            if not prompt.session_id:
+                return False
+
+            session_file = self.chats_dir / f"{prompt.session_id}.md"
+
+            if not session_file.exists():
+                metadata = f"""---
+session_id: {prompt.session_id}
+chat_name: {chat_name or 'unnamed'}
+created_at: '{datetime.now().isoformat()}'
+working_directory: {prompt.working_directory}
+total_prompts: 0
+---
+
+# Chat: {chat_name or prompt.session_id}
+
+"""
+                with open(session_file, "w", encoding="utf-8") as f:
+                    f.write(metadata)
+            else:
+                with open(session_file, "r", encoding="utf-8") as f:
+                    content = f.read()
+                    if f"## Prompt - {prompt.last_executed.strftime('%Y-%m-%d %H:%M:%S')}" in content and f"**User:** {prompt.content}" in content:
+                        return True
+
+            with open(session_file, "a", encoding="utf-8") as f:
+                executed_time = prompt.last_executed or datetime.now()
+                f.write(f"\n## Prompt - {executed_time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"**User:** {prompt.content}\n\n")
+
+                if prompt.execution_log:
+                    output_lines = prompt.execution_log.split('\n')
+                    for line in output_lines:
+                        if line.startswith('[') and 'Output:' in line:
+                            idx = output_lines.index(line)
+                            if idx + 1 < len(output_lines):
+                                response = '\n'.join(output_lines[idx+1:])
+                                f.write(f"**Claude:**\n{response}\n")
+                                break
+
+                f.write("\n---\n")
+
+            self._update_chat_metadata(session_file)
+            return True
+
+        except Exception as e:
+            print(f"Error appending to chat file: {e}")
+            return False
+
+    def _update_chat_metadata(self, chat_file: Path) -> None:
+        """Update total_prompts count in chat file metadata."""
+        try:
+            with open(chat_file, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            prompt_count = content.count("## Prompt -")
+
+            if content.startswith("---"):
+                parts = content.split("---", 2)
+                if len(parts) >= 3:
+                    metadata = parts[1]
+                    metadata_lines = metadata.strip().split('\n')
+                    new_metadata_lines = []
+
+                    for line in metadata_lines:
+                        if line.startswith('total_prompts:'):
+                            new_metadata_lines.append(f"total_prompts: {prompt_count}")
+                        else:
+                            new_metadata_lines.append(line)
+
+                    new_content = "---\n" + '\n'.join(new_metadata_lines) + "\n---" + parts[2]
+
+                    with open(chat_file, "w", encoding="utf-8") as f:
+                        f.write(new_content)
+
+        except Exception as e:
+            print(f"Error updating chat metadata: {e}")

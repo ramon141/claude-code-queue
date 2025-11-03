@@ -93,6 +93,12 @@ Examples:
     add_parser.add_argument(
         "--estimated-tokens", "-t", type=int, help="Estimated token usage"
     )
+    add_parser.add_argument(
+        "--session", "-s", type=str, help="Claude Code session ID to resume"
+    )
+    add_parser.add_argument(
+        "--chat-name", "-c", type=str, help="Chat name to add prompt to (searches for session ID automatically)"
+    )
 
     template_parser = subparsers.add_parser(
         "template", help="Create a prompt template file"
@@ -119,6 +125,19 @@ Examples:
     )
     list_parser.add_argument("--json", action="store_true", help="Output as JSON")
 
+    create_chat_parser = subparsers.add_parser("create-chat", help="Create a new Claude Code chat session")
+    create_chat_parser.add_argument("name", help="Name for the chat session")
+    create_chat_parser.add_argument("initial_prompt", help="Initial prompt to start the conversation")
+    create_chat_parser.add_argument(
+        "--priority", "-p", type=int, default=0, help="Priority (lower = higher priority)"
+    )
+    create_chat_parser.add_argument(
+        "--working-dir", "-d", default=".", help="Working directory"
+    )
+
+    list_chats_parser = subparsers.add_parser("list-chats", help="List active chat sessions")
+    list_chats_parser.add_argument("--json", action="store_true", help="Output as JSON")
+
     test_parser = subparsers.add_parser("test", help="Test Claude Code connection")
 
     args = parser.parse_args()
@@ -138,7 +157,7 @@ Examples:
         if args.command == "start":
             return cmd_start(manager, args)
         elif args.command == "add":
-            return cmd_add(manager, args)
+            return cmd_add(manager, args)   
         elif args.command == "template":
             return cmd_template(manager, args)
         elif args.command == "status":
@@ -147,6 +166,10 @@ Examples:
             return cmd_cancel(manager, args)
         elif args.command == "list":
             return cmd_list(manager, args)
+        elif args.command == "create-chat":
+            return cmd_create_chat(manager, args)
+        elif args.command == "list-chats":
+            return cmd_list_chats(manager, args)
         elif args.command == "test":
             return cmd_test(manager, args)
         else:
@@ -175,6 +198,25 @@ def cmd_start(manager: QueueManager, args) -> int:
 
 def cmd_add(manager: QueueManager, args) -> int:
     """Add a prompt to the queue."""
+    
+    # Resolve session_id from chat name if provided
+    session_id = getattr(args, 'session', None)
+    chat_name = getattr(args, 'chat_name', None)
+    
+    if chat_name and session_id:
+        print("Error: Cannot specify both --session and --chat-name")
+        return 1
+    
+    if chat_name:
+        session_id = manager.find_session_by_chat_name(chat_name)
+        if not session_id:
+            print(f"Error: No chat session found with name '{chat_name}'")
+            print("Use 'claude-queue list-chats' to see available chats")
+            return 1
+        print(f"✓ Found chat '{chat_name}' with session ID: {session_id}")
+        # Update last used timestamp
+        manager.chat_sessions.update_last_used(chat_name)
+    
     prompt = QueuedPrompt(
         content=args.prompt,
         working_directory=args.working_dir,
@@ -182,6 +224,7 @@ def cmd_add(manager: QueueManager, args) -> int:
         context_files=args.context_files,
         max_retries=args.max_retries,
         estimated_tokens=args.estimated_tokens,
+        session_id=session_id,
     )
 
     success = manager.add_prompt(prompt)
@@ -309,6 +352,69 @@ def cmd_list(manager: QueueManager, args) -> int:
             print(f"   Created: {prompt.created_at.strftime('%Y-%m-%d %H:%M:%S')}")
 
     return 0
+
+
+def cmd_create_chat(manager: QueueManager, args) -> int:
+    """Create a new Claude Code chat session."""
+    try:
+        print(f"Creating chat session '{args.name}'...")
+
+        # Create session by adding to queue
+        success, response, temp_session_id = manager.create_chat_session(
+            args.name,
+            args.initial_prompt,
+            args.working_dir
+        )
+
+        if success:
+            print(f"✓ Chat session '{args.name}' added to queue")
+            print(f"✓ Initial prompt queued for execution")
+            print(f"\nTo add more prompts to this chat session, use:")
+            print(f"  claude-queue add \"Your message\" --chat-name {args.name}")
+            print(f"\nRun 'claude-queue start' to execute the queued prompts and create the session.")
+            
+            return 0
+        else:
+            print(f"✗ Failed to create chat session: {response}")
+            return 1
+            
+    except Exception as e:
+        print(f"Error creating chat session: {e}")
+        return 1
+
+
+def cmd_list_chats(manager: QueueManager, args) -> int:
+    """List active chat sessions."""
+    try:
+        chat_sessions = manager.chat_sessions.list_chat_sessions()
+        
+        if args.json:
+            import json
+            print(json.dumps(chat_sessions, indent=2, default=str))
+            return 0
+        
+        if not chat_sessions:
+            print("No chat sessions found")
+            print("Create a new chat with: claude-queue create-chat <name> <initial_prompt>")
+            return 0
+        
+        print("Chat Sessions")
+        print("=" * 40)
+        
+        for session in chat_sessions:
+            print(f"💬 {session['chat_name']}")
+            print(f"   Session ID: {session['session_id']}")
+            print(f"   Total prompts: {session['total_prompts']}")
+            print(f"   Created: {session['created_at']}")
+            print(f"   Last used: {session['last_used']}")
+            print(f"   Working dir: {session['working_directory']}")
+            print()
+        
+        return 0
+        
+    except Exception as e:
+        print(f"Error listing chat sessions: {e}")
+        return 1
 
 
 def cmd_test(manager: QueueManager, args) -> int:

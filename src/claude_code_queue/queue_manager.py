@@ -2,14 +2,17 @@
 Queue manager with execution loop.
 """
 
+import os
 import time
 import signal
+import uuid
 from datetime import datetime, timedelta
-from typing import Optional, Callable, Dict, Any
+from typing import Optional, Callable, Dict, Any, Tuple
 
 from .models import QueuedPrompt, QueueState, PromptStatus, ExecutionResult
 from .storage import QueueStorage
 from .claude_interface import ClaudeCodeInterface
+from .chat_sessions import ChatSessionManager
 
 
 class QueueManager:
@@ -24,6 +27,7 @@ class QueueManager:
     ):
         self.storage = QueueStorage(storage_dir)
         self.claude_interface = ClaudeCodeInterface(claude_command, timeout)
+        self.chat_sessions = ChatSessionManager(storage_dir)
         self.check_interval = check_interval
         self.running = False
         self.state: Optional[QueueState] = None
@@ -160,9 +164,110 @@ class QueueManager:
 
         self.storage.save_queue_state(self.state)
 
-        result = self.claude_interface.execute_prompt(prompt)
+        # Handle session start prompts
+        if prompt.is_session_start:
+            result = self._execute_session_start(prompt)
+        else:
+            result = self.claude_interface.execute_prompt(prompt)
 
         self._process_execution_result(prompt, result)
+
+    def _execute_session_start(self, prompt: QueuedPrompt) -> ExecutionResult:
+        """Execute a session start prompt and create real Claude session using CLI."""
+        import subprocess
+        from pathlib import Path
+
+        start_time = time.time()
+
+        try:
+            # Extract chat name from temp session ID
+            temp_session_parts = prompt.session_id.split('-')
+            chat_name = temp_session_parts[1] if len(temp_session_parts) > 1 else "unnamed"
+
+            # Generate a real UUID for this session
+            real_session_id = str(uuid.uuid4())
+
+            # Execute via CLI to create new session with specific session ID
+            original_cwd = os.getcwd()
+            working_dir = Path(prompt.working_directory).resolve()
+            if not working_dir.exists():
+                working_dir.mkdir(parents=True, exist_ok=True)
+
+            os.chdir(working_dir)
+
+            cmd = [
+                self.claude_interface.claude_command,
+                "--print",
+                "--dangerously-skip-permissions",
+                "--session-id", real_session_id,
+                prompt.content
+            ]
+
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.claude_interface.timeout
+            )
+
+            os.chdir(original_cwd)
+
+            # Check if execution was successful
+            if result.returncode == 0:
+
+                # Save real session to database
+                if self.chat_sessions.save_chat_session(chat_name, real_session_id, prompt.working_directory):
+                    # Update prompt with real session ID
+                    old_temp_session_id = prompt.session_id
+                    prompt.session_id = real_session_id
+                    prompt.is_session_start = False  # Mark as no longer session start
+
+                    # Update all other prompts in queue that have the same temp session ID
+                    self._update_temp_session_ids(old_temp_session_id, real_session_id)
+
+                    execution_time = time.time() - start_time
+                    return ExecutionResult(
+                        success=True,
+                        output=result.stdout,
+                        execution_time=execution_time
+                    )
+                else:
+                    execution_time = time.time() - start_time
+                    return ExecutionResult(
+                        success=False,
+                        output="",
+                        error="Failed to save chat session to database",
+                        execution_time=execution_time
+                    )
+            else:
+                execution_time = time.time() - start_time
+                return ExecutionResult(
+                    success=False,
+                    output="",
+                    error=f"Failed to create Claude session: {result.stderr}",
+                    execution_time=execution_time
+                )
+
+        except Exception as e:
+            try:
+                os.chdir(original_cwd)
+            except:
+                pass
+            execution_time = time.time() - start_time
+            return ExecutionResult(
+                success=False,
+                output="",
+                error=f"Error creating session: {e}",
+                execution_time=execution_time
+            )
+
+    def _update_temp_session_ids(self, old_temp_session_id: str, real_session_id: str) -> None:
+        """Update all prompts in queue that have the same temp session ID."""
+        for queue_prompt in self.state.prompts:
+            if queue_prompt.session_id == old_temp_session_id:
+                queue_prompt.session_id = real_session_id
+                # Re-save the prompt file with updated session ID
+                self.storage.save_prompt(queue_prompt)
 
     def _process_execution_result(
         self, prompt: QueuedPrompt, result: ExecutionResult
@@ -216,23 +321,6 @@ class QueueManager:
                 )
 
         self.state.last_processed = datetime.now()
-
-    def _format_duration(self, seconds: float) -> str:
-        """Format duration in seconds to human readable format."""
-        if seconds < 0:
-            return "now"
-
-        if seconds < 60:
-            return f"{int(seconds)}s"
-        elif seconds < 3600:
-            minutes = int(seconds // 60)
-            return f"{minutes}m"
-        else:
-            hours = int(seconds // 3600)
-            minutes = int((seconds % 3600) // 60)
-            if minutes == 0:
-                return f"{hours}h"
-            return f"{hours}h {minutes}m"
 
     def add_prompt(self, prompt: QueuedPrompt) -> bool:
         """Add a prompt to the queue."""
@@ -295,31 +383,47 @@ class QueueManager:
         file_path = self.storage.create_prompt_template(filename, priority)
         return str(file_path)
 
-    def get_rate_limit_info(self) -> Dict[str, Any]:
-        """Get basic rate limit information for testing."""
+    def find_session_by_chat_name(self, chat_name: str) -> Optional[str]:
+        """Find session_id by chat name using ChatSessionManager or queued prompts."""
+        # First check existing chat sessions
+        session_id = self.chat_sessions.get_session_id(chat_name)
+        if session_id:
+            return session_id
+
+        # If not found, check for queued session start prompts
+        # Load state if not already loaded
         if not self.state:
             self.state = self.storage.load_queue_state()
 
-        current_time = datetime.now()
-        rate_limited_prompts = [
-            p for p in self.state.prompts if p.status == PromptStatus.RATE_LIMITED
-        ]
+        for prompt in self.state.prompts:
+            if prompt.is_session_start and prompt.session_id and f"temp-{chat_name}-" in prompt.session_id:
+                return prompt.session_id
 
-        info = {
-            "current_time": current_time,
-            "has_rate_limited_prompts": len(rate_limited_prompts) > 0,
-            "rate_limited_count": len(rate_limited_prompts),
-            "prompts": [],
-        }
+        return None
 
-        for prompt in rate_limited_prompts:
-            info["prompts"].append(
-                {
-                    "id": prompt.id,
-                    "rate_limited_at": prompt.rate_limited_at,
-                    "retry_count": prompt.retry_count,
-                    "max_retries": prompt.max_retries,
-                }
+    def create_chat_session(self, chat_name: str, initial_prompt: str, working_directory: str = ".") -> Tuple[bool, str, Optional[str]]:
+        """Create a new chat session by adding initial prompt to queue."""
+        try:
+            # Check if chat already exists
+            if self.chat_sessions.chat_exists(chat_name):
+                return False, f"Chat '{chat_name}' already exists", None
+
+            # Generate a temporary session ID that will be replaced with real UUID when executed
+            temp_session_id = f"temp-{chat_name}-{uuid.uuid4().hex[:8]}"
+
+            # Create initial prompt and mark as session start
+            prompt = QueuedPrompt(
+                content=initial_prompt,
+                working_directory=working_directory,
+                session_id=temp_session_id,
+                is_session_start=True,
+                priority=-1  # Higher priority to execute first
             )
 
-        return info
+            # Add to queue
+            self.add_prompt(prompt)
+
+            return True, f"Chat session '{chat_name}' queued for creation", temp_session_id
+
+        except Exception as e:
+            return False, f"Error creating chat session: {e}", None
